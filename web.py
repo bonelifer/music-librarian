@@ -171,6 +171,14 @@ th, td { text-align: left; padding: .5rem .6rem; vertical-align: top;
   display: flex; flex-wrap: wrap; gap: .5rem 1rem; align-items: center;
   padding: .75rem 0; border-top: 1px solid var(--line); margin-top: .5rem; }
 .pager { display: flex; gap: 1rem; margin: 1rem 0; }
+.filters { list-style: none; padding: 0; margin: 1rem 0; display: flex;
+  flex-wrap: wrap; gap: .5rem; }
+.filters a { display: inline-block; padding: .3rem .8rem;
+  border: 1px solid var(--line); border-radius: 999px;
+  text-decoration: none; color: var(--fg); background: var(--surface); }
+.filters a:hover { border-color: var(--accent); }
+.filters a[aria-current=page] { background: var(--picked);
+  border-color: var(--accent); font-weight: 600; }
 details { margin: 1rem 0; }
 summary { cursor: pointer; font-weight: 600; padding: .25rem 0; }
 @media (max-width: 40rem) {
@@ -230,6 +238,24 @@ def set_theme(connection, theme: str) -> None:
             "('theme', ?, ?) ON CONFLICT (key) DO UPDATE SET "
             "value = excluded.value, updated_at = excluded.updated_at",
             (theme, store.now_iso()))
+
+
+def review_counts(connection) -> dict:
+    """Albums per status, plus the review sub-counts.
+
+    Besides every status, the result has "nosuggest" (pending or changed
+    albums whose Last.fm lookup found nothing) and "waiting" (pending or
+    changed albums not looked up on Last.fm yet).
+    """
+    counts = store.album_counts(connection)
+    counts["nosuggest"] = connection.execute(
+        "SELECT COUNT(*) FROM albums WHERE status IN ('pending', "
+        "'changed') AND suggestions IS NOT NULL AND suggestions = '[]'"
+    ).fetchone()[0]
+    counts["waiting"] = connection.execute(
+        "SELECT COUNT(*) FROM albums WHERE status IN ('pending', "
+        "'changed') AND suggestions IS NULL").fetchone()[0]
+    return counts
 
 
 def esc(value) -> str:
@@ -336,14 +362,17 @@ class Handler(BaseHTTPRequestHandler):
     def nav_links(self) -> str:
         """Main navigation, marking the current page for screen readers."""
         path = urlsplit(self.path).path
-        links = [("/", "Overview"), ("/albums?filter=pending",
-                                     "Waiting for review"),
-                 ("/next", "Next album"), ("/bulk", "Bulk accept"),
-                 ("/tags", "Tags"), ("/lyrics", "Lyrics")]
+        links = [
+            ("/", "Overview", path == "/"),
+            # The genre review pages: the filtered lists, one album, bulk.
+            ("/albums?filter=pending", "Genres",
+             path in ("/albums", "/bulk") or path.startswith("/album/")),
+            ("/tags", "Tags", path == "/tags" or path.startswith("/tags/")),
+            ("/lyrics", "Lyrics", path == "/lyrics"),
+        ]
         items = ["<li class=\"brand\">Music librarian</li>"]
-        for href, label in links:
-            current = ' aria-current="page"' \
-                if href.split("?")[0] == path else ""
+        for href, label, is_current in links:
+            current = ' aria-current="page"' if is_current else ""
             items.append(f"<li><a href=\"{href}\"{current}>{label}</a></li>")
         return "".join(items)
 
@@ -481,17 +510,9 @@ class Handler(BaseHTTPRequestHandler):
         """Counts per status, background status and actions."""
         connection = self.db()
         try:
-            counts = store.album_counts(connection)
-            nosuggest = connection.execute(
-                "SELECT COUNT(*) FROM albums WHERE status IN ('pending', "
-                "'changed') AND suggestions IS NOT NULL AND suggestions = "
-                "'[]'").fetchone()[0]
-            waiting = connection.execute(
-                "SELECT COUNT(*) FROM albums WHERE status IN ('pending', "
-                "'changed') AND suggestions IS NULL").fetchone()[0]
+            counts = review_counts(connection)
         finally:
             connection.close()
-        counts["nosuggest"] = nosuggest
         cards = "".join(
             f"<li><a class=\"card\" href=\"/albums?filter={key}\">"
             f"<span class=\"count\">{counts.get(key, 0)}</span>"
@@ -507,14 +528,13 @@ class Handler(BaseHTTPRequestHandler):
             f"<h1>Overview</h1>{notice}{key_note}"
             "<h2 id=\"by-status\">Albums by status</h2>"
             f"<ul class=\"cards\" aria-labelledby=\"by-status\">{cards}</ul>"
-            "<div class=\"toolbar\"><a class=\"btn primary\" href=\"/next\">"
-            "Review the next album</a>"
+            "<div class=\"toolbar\">"
             f"<form method=\"post\" action=\"/scan\">{self.token_field()}"
             "<button type=\"submit\">Scan the library now</button></form>"
             "</div><h2>Background work</h2><div class=\"panel\"><ul>"
             f"<li>Last scan: {esc(status['scan'])}</li><li>Last.fm lookups: "
             f"{esc(status['suggest'])}</li><li>Albums still waiting for a "
-            f"Last.fm lookup: {waiting}</li></ul></div>"))
+            f"Last.fm lookup: {counts['waiting']}</li></ul></div>"))
 
     def album_list(self, name: str, page_text: str, tick_all: bool = False,
                    message: str = "") -> None:
@@ -529,6 +549,7 @@ class Handler(BaseHTTPRequestHandler):
         where, params = self.filter_sql(name)
         connection = self.db()
         try:
+            counts = review_counts(connection)
             total = connection.execute(
                 f"SELECT COUNT(*) FROM albums WHERE {where}",
                 params).fetchone()[0]
@@ -595,8 +616,19 @@ class Handler(BaseHTTPRequestHandler):
                 "<table class=\"list\"><thead><tr><th scope=\"col\">Album"
                 "</th><th scope=\"col\">Genres in the files</th></tr></thead>"
                 f"<tbody>{body_rows}</tbody></table>")
-        self.send_page(FILTERS[name], (
-            f"<h1>{esc(FILTERS[name])}</h1>{notice}<p>{total} albums.</p>"
+        filter_links = "".join(
+            f"<li><a href=\"/albums?filter={key}\"{current}>"
+            f"{esc(label)} ({counts.get(key, 0)})</a></li>"
+            for key, label in FILTERS.items()
+            for current in (' aria-current="page"' if key == name else "",))
+        self.send_page(f"Genres: {FILTERS[name]}", (
+            "<h1>Genres</h1>"
+            "<ul class=\"filters\" aria-label=\"Album filters\">"
+            f"{filter_links}</ul>"
+            "<div class=\"toolbar\"><a class=\"btn primary\" "
+            "href=\"/next\">Review one at a time</a>"
+            "<a class=\"btn\" href=\"/bulk\">Bulk accept</a></div>"
+            f"{notice}<h2>{esc(FILTERS[name])}</h2><p>{total} albums.</p>"
             f"{content}<p class=\"pager\">{pages}</p>"))
 
     @staticmethod
@@ -646,7 +678,7 @@ class Handler(BaseHTTPRequestHandler):
         return ("status = ?", (name,))
 
     def go_next(self, after_id, message: str = ""):
-        """Redirect to the next album needing review, in list order.
+        """Redirect to the next album waiting for review, in list order.
 
         message, when given, is shown on the page it lands on.
         """
@@ -671,11 +703,11 @@ class Handler(BaseHTTPRequestHandler):
 
     @staticmethod
     def next_row(connection, after_id, ready: str):
-        """Next reviewable album after after_id (wrapping), or None.
+        """Next pending album after after_id (wrapping), or None.
 
         ready is an extra SQL condition (a constant, never user input).
         """
-        base = f"status IN ('pending', 'changed') {ready} AND id != ?"
+        base = f"status = 'pending' {ready} AND id != ?"
         if after_id is not None:
             current = connection.execute(
                 "SELECT albumartist, album FROM albums WHERE id = ?",

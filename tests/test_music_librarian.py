@@ -710,6 +710,38 @@ class WebTests(unittest.TestCase):
         with urlopen(self.base + "/next", timeout=10) as response:
             self.assertTrue(response.url.endswith("/album/1"))
 
+    def test_next_only_offers_pending_albums(self):
+        db = self.reviewer.connect()
+        db.execute("UPDATE albums SET status = 'changed'")
+        db.close()
+        with urlopen(self.base + "/next", timeout=10) as response:
+            self.assertIn("Nothing+is+waiting+for+review", response.url)
+
+    def test_nav_groups_the_genre_pages(self):
+        def current(path):
+            _, body = self.get(path)
+            nav = body.split("</nav>")[0]
+            return [label for label in ("Overview", "Genres", "Tags", "Lyrics")
+                    if f'aria-current="page">{label}</a>' in nav]
+
+        self.assertEqual(current("/"), ["Overview"])
+        for path in ("/albums?filter=pending", "/albums?filter=applied",
+                     "/bulk", "/album/1"):
+            self.assertEqual(current(path), ["Genres"], path)
+        self.assertEqual(current("/tags"), ["Tags"])
+        self.assertEqual(current("/tags/field?name=TPUB"), ["Tags"])
+        self.assertEqual(current("/lyrics"), ["Lyrics"])
+
+    def test_genres_page_has_filters_and_review_buttons(self):
+        _, body = self.get("/albums?filter=applied")
+        self.assertIn("<h1>Genres</h1>", body)
+        self.assertIn('href="/albums?filter=pending">Waiting for review (1)',
+                      body)
+        self.assertIn('href="/albums?filter=applied" aria-current="page">'
+                      "Applied (0)", body)
+        self.assertIn('href="/next">Review one at a time', body)
+        self.assertIn('href="/bulk">Bulk accept', body)
+
     def test_review_list_offers_checkboxes_with_default_genres(self):
         _, body = self.get("/albums?filter=pending")
         self.assertIn('name="album" value="1"', body)
