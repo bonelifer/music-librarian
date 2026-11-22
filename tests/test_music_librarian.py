@@ -780,6 +780,53 @@ class WebTests(unittest.TestCase):
                                "filter": "changed", "album": "1"})
         self.assertEqual(genres_of(self.track), ["Shoegaze"])
 
+    def test_ignored_list_can_ask_again(self):
+        db = self.reviewer.connect()
+        db.execute("UPDATE albums SET status = 'ignored'")
+        db.close()
+        _, body = self.get("/albums?filter=ignored")
+        self.assertIn('name="album" value="1"', body)
+        self.assertIn('action="/unignore"', body)
+        self.assertIn("Scan the library now", body)
+        _, body = self.get("/albums?filter=ignored&tick=all")
+        self.assertIn('value="1" id="a1" checked', body)
+        status, url = self.post("/unignore", {"token": "wrong", "album": "1"})
+        self.assertEqual(status, 403)
+        status, url = self.post("/unignore", {
+            "token": self.server.token, "page": "1", "album": "1"})
+        self.assertEqual(status, 200)
+        self.assertIn("filter=ignored", url)
+        self.assertIn("1+album+is+back+under+Waiting+for+review", url)
+        db = self.reviewer.connect()
+        status = db.execute("SELECT status FROM albums").fetchone()[0]
+        db.close()
+        self.assertEqual(status, "pending")
+
+    def test_ask_again_leaves_other_albums_alone(self):
+        db = self.reviewer.connect()
+        db.execute("UPDATE albums SET status = 'applied'")
+        db.close()
+        _, url = self.post("/unignore", {"token": self.server.token,
+                                         "album": "1"})
+        self.assertIn("Nothing+changed", url)
+        db = self.reviewer.connect()
+        status = db.execute("SELECT status FROM albums").fetchone()[0]
+        db.close()
+        self.assertEqual(status, "applied")
+
+    def test_scan_returns_to_the_page_that_asked(self):
+        self.reviewer.scan = lambda: None
+        self.reviewer.auto_clean = lambda: None
+        self.reviewer.suggest_missing = lambda: None
+        _, url = self.post("/scan", {"token": self.server.token,
+                                     "back": "/albums?filter=ignored"})
+        self.assertIn("/albums?filter=ignored&msg=Scan+started", url)
+        _, url = self.post("/scan", {"token": self.server.token,
+                                     "back": "//example.com/"})
+        self.assertTrue(url.startswith(self.base + "/?msg=Scan+started"))
+        _, url = self.post("/scan", {"token": self.server.token})
+        self.assertTrue(url.startswith(self.base + "/?msg=Scan+started"))
+
     def test_clean_genres(self):
         self.assertEqual(web.clean_genres(["Rock,  Pop ", "rock"]),
                          ["Rock", "Pop"])
