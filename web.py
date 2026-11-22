@@ -477,7 +477,9 @@ class Handler(BaseHTTPRequestHandler):
                 back = "/"
             return self.redirect(back)
         if path == "/scan":
-            return self.start_scan()
+            return self.start_scan(form)
+        if path == "/unignore":
+            return self.unignore_ticked(form)
         if path == "/bulk":
             return self.bulk_apply(form)
         if path == "/approve":
@@ -579,6 +581,10 @@ class Handler(BaseHTTPRequestHandler):
             title = (f"{esc(row['albumartist'] or 'Unknown artist')} - "
                      f"{esc(row['album'])}")
             now = genre_list(store.loads(row["current_genres"], []))
+            if name == "ignored":
+                items.append(self.ask_again_row(row["id"], title, now,
+                                                tick_all))
+                continue
             if not approvable:
                 items.append(
                     f"<tr><td><a href=\"/album/{row['id']}\">{title}</a></td>"
@@ -590,7 +596,7 @@ class Handler(BaseHTTPRequestHandler):
             items.append(self.pick_row(
                 row["id"], title, now, genres, tick_all,
                 "Albums without suggestions need their own page"))
-        columns = 4 if approvable else 2
+        columns = 4 if approvable else 3 if name == "ignored" else 2
         body_rows = "".join(items) or (
             f"<tr><td colspan=\"{columns}\">No albums here.</td></tr>")
         pages = ""
@@ -602,13 +608,13 @@ class Handler(BaseHTTPRequestHandler):
                       "Next page</a>")
         notice = f"<p class=\"notice\" role=\"status\">{esc(message)}</p>" \
             if message else ""
+        toggle = {"filter": name, "page": page}
+        if not tick_all:
+            toggle["tick"] = "all"
+        toggle_link = (f"<a href=\"/albums?{urlencode(toggle)}\">"
+                       f"{'Untick all' if tick_all else 'Tick all on this page'}"
+                       "</a>")
         if approvable:
-            toggle = {"filter": name, "page": page}
-            if not tick_all:
-                toggle["tick"] = "all"
-            toggle_link = (f"<a href=\"/albums?{urlencode(toggle)}\">"
-                           f"{'Untick all' if tick_all else 'Tick all on this page'}"
-                           "</a>")
             content = (
                 "<p>Tick albums to approve them with the genres shown under "
                 "<em>Will become</em> (the ones their album page would "
@@ -623,6 +629,23 @@ class Handler(BaseHTTPRequestHandler):
                 + "<div class=\"actions\"><button type=\"submit\" "
                 "class=\"primary\">Write genres for the ticked albums</button>"
                 f"{toggle_link}</div></form>")
+        elif name == "ignored":
+            content = (
+                "<p>These albums are never offered for review. Tick the "
+                "ones to put back under <em>Waiting for review</em>. Click "
+                "anywhere on a row except the album name to tick it.</p>"
+                f"<p>{toggle_link}</p>"
+                f"<form method=\"post\" action=\"/unignore\">"
+                f"{self.token_field()}"
+                f"<input type=\"hidden\" name=\"page\" value=\"{page}\">"
+                "<table class=\"list pickable\"><thead><tr>"
+                "<th scope=\"col\" class=\"pick\">Ask again</th>"
+                "<th scope=\"col\">Album</th>"
+                "<th scope=\"col\">Genres in the files</th></tr></thead>"
+                f"<tbody>{body_rows}</tbody></table>"
+                "<div class=\"actions\"><button type=\"submit\" "
+                "class=\"primary\">Ask again about the ticked albums"
+                f"</button>{toggle_link}</div></form>")
         else:
             content = (
                 "<table class=\"list\"><thead><tr><th scope=\"col\">Album"
@@ -633,13 +656,20 @@ class Handler(BaseHTTPRequestHandler):
             f"{esc(label)} ({counts.get(key, 0)})</a></li>"
             for key, label in FILTERS.items()
             for current in (' aria-current="page"' if key == name else "",))
+        # The Never ask again page can also start a scan and come back.
+        scan_form = (
+            f"<form method=\"post\" action=\"/scan\">{self.token_field()}"
+            "<input type=\"hidden\" name=\"back\" "
+            "value=\"/albums?filter=ignored\"><button type=\"submit\">"
+            "Scan the library now</button></form>"
+            if name == "ignored" else "")
         self.send_page(f"Genres: {FILTERS[name]}", (
             "<h1>Genres</h1>"
             "<ul class=\"filters\" aria-label=\"Album filters\">"
             f"{filter_links}</ul>"
             "<div class=\"toolbar\"><a class=\"btn primary\" "
             "href=\"/next\">Review one at a time</a>"
-            "<a class=\"btn\" href=\"/bulk\">Bulk accept</a></div>"
+            f"<a class=\"btn\" href=\"/bulk\">Bulk accept</a>{scan_form}</div>"
             f"{notice}<h2>{esc(FILTERS[name])}</h2><p>{total} albums.</p>"
             f"{content}<p class=\"pager\">{pages}</p>"))
 
@@ -669,6 +699,20 @@ class Handler(BaseHTTPRequestHandler):
             f"for=\"{box_id}\">{now}</label></td>"
             f"<td data-label=\"Will become\"><label class=\"fill\" "
             f"for=\"{box_id}\">{genre_list(genres)}</label></td></tr>")
+
+    @staticmethod
+    def ask_again_row(album_id: int, title: str, now: str,
+                      ticked: bool) -> str:
+        """One tickable row of the Never ask again list."""
+        box_id = f"a{album_id}"
+        return (
+            f"<tr><td class=\"pick\"><label class=\"fill\" for=\"{box_id}\">"
+            f"<input type=\"checkbox\" name=\"album\" value=\"{album_id}\" "
+            f"id=\"{box_id}\"{' checked' if ticked else ''} aria-label=\""
+            f"Ask again about {title}\"></label></td>"
+            f"<td data-label=\"Album\"><a href=\"/album/{album_id}\">{title}"
+            f"</a></td><td data-label=\"Now\"><label class=\"fill\" "
+            f"for=\"{box_id}\">{now}</label></td></tr>")
 
     @staticmethod
     def pick_table(body_rows: str, now_heading: str) -> str:
@@ -895,8 +939,12 @@ class Handler(BaseHTTPRequestHandler):
             text += " " + result["mpd"]
         return text
 
-    def start_scan(self) -> None:
-        """Run a scan and a suggestion pass in the background."""
+    def start_scan(self, form) -> None:
+        """Run a scan and a suggestion pass in the background.
+
+        The form may name a page on this site to return to ("back");
+        otherwise the Overview is shown.
+        """
         import threading
 
         def work():
@@ -908,7 +956,39 @@ class Handler(BaseHTTPRequestHandler):
                 self.reviewer.status["scan"] = f"failed: {error}"
 
         threading.Thread(target=work, daemon=True).start()
-        self.redirect("/?" + urlencode({"msg": "Scan started."}))
+        back = form.get("back", ["/"])[0]
+        # Only return to a page on this site.
+        if not back.startswith("/") or back.startswith("//"):
+            back = "/"
+        joiner = "&" if "?" in back else "?"
+        self.redirect(back + joiner + urlencode({"msg": "Scan started."}))
+
+    def unignore_ticked(self, form) -> None:
+        """Put the ticked Never ask again albums back under Waiting for review.
+
+        Only albums that are still ignored change, so a stale page cannot
+        touch an album that has moved on.
+        """
+        page = form.get("page", ["1"])[0]
+        page = page if page.isdigit() else "1"
+        chosen = sorted({int(value) for value in form.get("album", [])
+                         if value.isdigit()})
+        moved = 0
+        connection = self.db()
+        try:
+            with store.transaction(connection):
+                for album_id in chosen:
+                    moved += connection.execute(
+                        "UPDATE albums SET status = 'pending', "
+                        "updated_at = ? WHERE id = ? AND status = 'ignored'",
+                        (store.now_iso(), album_id)).rowcount
+        finally:
+            connection.close()
+        message = (f"{moved} {'album is' if moved == 1 else 'albums are'} "
+                   "back under Waiting for review." if moved else
+                   "Nothing changed: no ignored albums were ticked.")
+        self.redirect("/albums?" + urlencode(
+            {"filter": "ignored", "page": page, "msg": message}))
 
     def bulk_candidates(self):
         """Pending albums whose best suggestion scores at least the minimum."""
