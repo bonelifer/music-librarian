@@ -606,6 +606,7 @@ class WebTests(unittest.TestCase):
         status, body = self.get("/")
         self.assertEqual(status, 200)
         self.assertIn("LASTFM_API_KEY is not set", body)
+        self.assertIn("looks after the genre tags in your library", body)
         status, body = self.get("/album/1")
         self.assertIn('value="Indie Rock" checked', body)
         self.assertIn('value="Rock" checked', body)

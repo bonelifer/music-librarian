@@ -526,6 +526,18 @@ class Handler(BaseHTTPRequestHandler):
             "suggestions can be fetched.</p>")
         self.send_page("Overview", (
             f"<h1>Overview</h1>{notice}{key_note}"
+            "<p>Music librarian looks after the genre tags in your library. "
+            "It scans the library into albums, asks Last.fm which genres "
+            "each album is known for, and suggests them. On the "
+            "<a href=\"/albums?filter=pending\">Genres</a> page you pick the "
+            "ones you want, and only the genre tag is written into the "
+            "files; every album can be reverted. <a href=\"/tags\">Tags</a> "
+            "lists every tag field in the library so you can remove the "
+            "ones you don't want, with undo. <a href=\"/lyrics\">Lyrics</a> "
+            "fills in missing lyrics from LRCLIB. The library is rescanned "
+            "on a schedule, or right away with <em>Scan the library "
+            "now</em>. The cards below count albums by status; click one "
+            "to see those albums.</p>"
             "<h2 id=\"by-status\">Albums by status</h2>"
             f"<ul class=\"cards\" aria-labelledby=\"by-status\">{cards}</ul>"
             "<div class=\"toolbar\">"
